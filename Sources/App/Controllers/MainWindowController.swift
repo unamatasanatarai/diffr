@@ -447,7 +447,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
 
     public func isDirty(_ side: EditorSide) -> Bool {
         guard let document = documents[side] else { return false }
-        return document.isDirty(currentText: editor(for: side).text)
+        return document.isDirty(current: editor(for: side).textStorage.mutableString)
     }
 
     /// Only file-backed panes count: pasted scratch text is not a document and never nags on close.
@@ -456,10 +456,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     public func refreshDocumentState() {
+        var anyDirty = false
         for side in EditorSide.allCases {
             let label = titleLabel(for: side)
             if let document = documents[side] {
-                label.stringValue = "\(document.url.lastPathComponent)\(isDirty(side) ? " — Edited" : "")"
+                let dirty = isDirty(side)
+                anyDirty = anyDirty || dirty
+                label.stringValue = "\(document.url.lastPathComponent)\(dirty ? " — Edited" : "")"
                 label.toolTip = "\(document.url.path) (\(document.encoding.displayName))"
                 label.isHidden = false
             } else {
@@ -469,7 +472,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             }
         }
         // Shows the "unsaved" dot in the window's close button.
-        window?.isDocumentEdited = EditorSide.allCases.contains { isDirty($0) }
+        window?.isDocumentEdited = anyDirty
     }
 
     private var focusedSide: EditorSide? {

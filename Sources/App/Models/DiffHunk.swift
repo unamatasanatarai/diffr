@@ -33,36 +33,33 @@ public struct WordHighlightSpan: Equatable {
     }
 }
 
+/// One visual row of the split view. Rows carry no line text (that already lives in the
+/// editors and, for changed lines, in the hunk): keeping a copy of every line here doubled
+/// memory for large files.
 public struct AlignedDiffRow: Equatable {
     public let leftLineNumber: Int?
-    public let leftText: String?
     public let leftKind: DiffLineKind
-    public let leftWordHighlights: [WordHighlightSpan]
+    public internal(set) var leftWordHighlights: [WordHighlightSpan]
 
     public let rightLineNumber: Int?
-    public let rightText: String?
     public let rightKind: DiffLineKind
-    public let rightWordHighlights: [WordHighlightSpan]
+    public internal(set) var rightWordHighlights: [WordHighlightSpan]
 
     public let hunkIndex: Int?
 
     public init(
         leftLineNumber: Int?,
-        leftText: String?,
         leftKind: DiffLineKind,
         leftWordHighlights: [WordHighlightSpan] = [],
         rightLineNumber: Int?,
-        rightText: String?,
         rightKind: DiffLineKind,
         rightWordHighlights: [WordHighlightSpan] = [],
         hunkIndex: Int?
     ) {
         self.leftLineNumber = leftLineNumber
-        self.leftText = leftText
         self.leftKind = leftKind
         self.leftWordHighlights = leftWordHighlights
         self.rightLineNumber = rightLineNumber
-        self.rightText = rightText
         self.rightKind = rightKind
         self.rightWordHighlights = rightWordHighlights
         self.hunkIndex = hunkIndex
@@ -102,6 +99,9 @@ public struct DiffResult: Equatable {
     public let alignedRows: [AlignedDiffRow]
     public let additionsCount: Int
     public let deletionsCount: Int
+    /// Upper bound on the display width of the widest line on each side, in monospace columns.
+    public var leftMaxColumns: Int = 0
+    public var rightMaxColumns: Int = 0
 
     public var isIdentical: Bool {
         return hunks.isEmpty
@@ -117,6 +117,12 @@ public struct DiffResult: Equatable {
         self.alignedRows = alignedRows
         self.additionsCount = additionsCount
         self.deletionsCount = deletionsCount
+    }
+
+    /// O(1) lookup: hunk ids are their index in `hunks` (falls back to a scan otherwise).
+    public func hunk(withId id: Int) -> DiffHunk? {
+        if id >= 0 && id < hunks.count && hunks[id].id == id { return hunks[id] }
+        return hunks.first { $0.id == id }
     }
 
     public static var empty: DiffResult {

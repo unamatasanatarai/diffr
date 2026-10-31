@@ -89,7 +89,7 @@ public final class DiffCoordinator: NSObject {
             NSSound.beep()
             return
         }
-        if let hunk = diffResult.hunks.first(where: { $0.id == hunkIndex }) {
+        if let hunk = diffResult.hunk(withId: hunkIndex) {
             copyHunk(hunk, direction: direction)
         }
     }
@@ -182,13 +182,16 @@ public final class DiffCoordinator: NSObject {
         isComputingInBackground = true
 
         let generation = textGeneration
-        var left = leftEditor.text
-        var right = rightEditor.text
-        left.makeContiguousUTF8()
-        right.makeContiguousUTF8()
+        // UTF-16 snapshots are a bulk memcpy; the UTF-8 transcode happens off the main thread.
+        let leftUnits = DiffEngine.utf16Units(of: leftEditor.textStorage.mutableString)
+        let rightUnits = DiffEngine.utf16Units(of: rightEditor.textStorage.mutableString)
 
         diffQueue.async { [weak self] in
-            let result = DiffEngine.computeDiff(leftText: left, rightText: right, includeWordDiff: true)
+            let result = DiffEngine.computeDiff(
+                leftText: DiffEngine.nativeString(fromUTF16: leftUnits),
+                rightText: DiffEngine.nativeString(fromUTF16: rightUnits),
+                includeWordDiff: true
+            )
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.isComputingInBackground = false
@@ -215,8 +218,8 @@ public final class DiffCoordinator: NSObject {
         debounceTimer = nil
         let generation = textGeneration
         let result = DiffEngine.computeDiff(
-            leftText: leftEditor.text,
-            rightText: rightEditor.text,
+            leftText: leftEditor.diffText,
+            rightText: rightEditor.diffText,
             includeWordDiff: true
         )
         apply(result, generation: generation)
@@ -225,7 +228,11 @@ public final class DiffCoordinator: NSObject {
     private func apply(_ result: DiffResult, generation: Int) {
         diffResult = result
         computedGeneration = generation
-        if let active = activeHunkIndex, !result.hunks.contains(where: { $0.id == active }) {
+        leftEditor.estimatedMaxColumns = result.leftMaxColumns
+        rightEditor.estimatedMaxColumns = result.rightMaxColumns
+        leftEditor.diffedLineCount = leftEditor.lineCount
+        rightEditor.diffedLineCount = rightEditor.lineCount
+        if let active = activeHunkIndex, result.hunk(withId: active) == nil {
             activeHunkIndex = nil
         }
 
@@ -397,15 +404,15 @@ public final class DiffCoordinator: NSObject {
     public func copyHunk(_ hunk: DiffHunk, direction: MergeDirection) {
         ensureDiffCurrent()
         // Only act on a hunk that is part of the diff of the text as it is right now.
-        guard let current = diffResult.hunks.first(where: { $0.id == hunk.id }), current == hunk else {
+        guard let current = diffResult.hunk(withId: hunk.id), current == hunk else {
             NSSound.beep()
             return
         }
 
         let outcome = DiffEngine.applyHunk(
             current,
-            leftText: leftEditor.text,
-            rightText: rightEditor.text,
+            leftText: leftEditor.diffText,
+            rightText: rightEditor.diffText,
             direction: direction
         )
         let name = direction == .leftToRight ? "Copy Change to Right" : "Copy Change to Left"
@@ -436,7 +443,7 @@ public final class DiffCoordinator: NSObject {
     }
 
     private func hunkForCommand(focusedEditor: DiffEditorView?) -> DiffHunk? {
-        if let active = activeHunkIndex, let hunk = diffResult.hunks.first(where: { $0.id == active }) {
+        if let active = activeHunkIndex, let hunk = diffResult.hunk(withId: active) {
             return hunk
         }
         guard let editor = focusedEditor else { return nil }

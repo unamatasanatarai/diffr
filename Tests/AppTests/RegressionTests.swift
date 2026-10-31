@@ -362,6 +362,109 @@ public enum RegressionTests {
             try expect(leftEditor.gutterWidthConstraint.constant == width3, "Left gutter must sync to max line count (250)")
             try expect(rightEditor.gutterWidthConstraint.constant == width3, "Right gutter must sync to max line count (250)")
         }
+
+        // MARK: Performance rewrite: byte-level primitives must match the standard library exactly
+
+        testRunner("Byte-level text primitives agree with the standard library (fuzz, incl. lone surrogates)") {
+            var rng = SplitMix(seed: 0xD1FF)
+            let alphabet: [UInt16] = [0x61, 0x5A, 0x31, 0x5F, 0x20, 0x09, 0x0A, 0x0D, 0x2E, 0xE9, 0x301, 0x7FF, 0x800,
+                                      0x4E2D, 0xFFFD, 0xFEFF, 0x2028, 0xD83D, 0xDE00, 0xDC00, 0xD800]
+            for _ in 0..<400 {
+                let units = (0..<Int(rng.next() % 60)).map { _ in alphabet[Int(rng.next() % UInt64(alphabet.count))] }
+                let ns = NSString(characters: units, length: units.count)
+
+                // UTF-16 -> UTF-8 matches Swift's repairing decoder, and keeps UTF-16 length.
+                let fast = DiffEngine.nativeString(from: ns)
+                let reference = String(decoding: units, as: UTF16.self)
+                try expect(fast.utf8.elementsEqual(reference.utf8), "Transcode mismatch for \(units)")
+                try expect(fast.utf16.count == units.count, "UTF-16 length must be preserved")
+
+                // UTF-8 -> UTF-16 round trip.
+                var back: [UInt16] = []
+                var copy = fast
+                copy.withUTF8 { TextBuffers.appendUTF16(fromUTF8: $0, to: &back) }
+                try expect(back == Array(fast.utf16), "UTF-16 round trip mismatch")
+
+                // Line splitting matches the canonical splitter, and the line count matches lineRanges.
+                let ranges = copy.withUTF8 { TextBuffers.lineRanges(utf8: $0) }
+                let lines = DiffEngine.splitLines(fast)
+                try expect(ranges.count == lines.count, "Line count mismatch")
+                for (range, line) in zip(ranges, lines) {
+                    let bytes = Array(fast.utf8)[range]
+                    try expect(bytes.elementsEqual(line.utf8), "Line bytes mismatch")
+                }
+                try expect(DiffEngine.lineCount(in: ns) == DiffEngine.lineRanges(in: ns).count)
+
+                // Fast tokenizer matches the reference tokenizer.
+                let tokens = back.withUnsafeBufferPointer { WordDiffEngine.tokens(in: $0) }
+                let refTokens = WordDiffEngine.tokenize(line: fast)
+                try expect(tokens.map { NSRange(location: $0.start, length: $0.length) } == refTokens.map { $0.range },
+                           "Tokenizer mismatch for \(units)")
+            }
+        }
+
+        testRunner("Diff output reconstructs both texts exactly and every hunk applies cleanly (fuzz)") {
+            var rng = SplitMix(seed: 42)
+            let vocabulary = ["alpha", "beta", "gamma", "", "  indented", "x = 1;", "e\u{301}", "é", "a\r", "😀 emoji", "tab\there"]
+            for _ in 0..<150 {
+                let left = (0..<Int(rng.next() % 25)).map { _ in vocabulary[Int(rng.next() % UInt64(vocabulary.count))] }
+                var right = left
+                for _ in 0..<Int(rng.next() % 6) {
+                    let op = rng.next() % 3
+                    let pos = right.isEmpty ? 0 : Int(rng.next() % UInt64(right.count))
+                    let word = vocabulary[Int(rng.next() % UInt64(vocabulary.count))]
+                    if op == 0 || right.isEmpty { right.insert(word, at: pos) }
+                    else if op == 1 { right.remove(at: pos) }
+                    else { right[pos] = word + " changed" }
+                }
+                let lText = left.joined(separator: "\n")
+                let rText = right.joined(separator: "\n")
+                let result = DiffEngine.computeDiff(leftText: lText, rightText: rText)
+                let lLines = DiffEngine.splitLines(lText)
+                let rLines = DiffEngine.splitLines(rText)
+
+                // Rows enumerate every line of both sides exactly once, in order.
+                let leftNumbers = result.alignedRows.compactMap { $0.leftLineNumber }
+                let rightNumbers = result.alignedRows.compactMap { $0.rightLineNumber }
+                try expect(leftNumbers == Array(stride(from: 1, through: lLines.count, by: 1)), "Left rows must cover every line")
+                try expect(rightNumbers == Array(stride(from: 1, through: rLines.count, by: 1)), "Right rows must cover every line")
+                for row in result.alignedRows where row.leftKind == .unchanged {
+                    try expect(lLines[row.leftLineNumber! - 1].utf8.elementsEqual(rLines[row.rightLineNumber! - 1].utf8),
+                               "Unchanged rows must be byte-identical (é vs e+◌́ must differ)")
+                }
+                // Word spans stay inside their line.
+                for row in result.alignedRows {
+                    if let n = row.leftLineNumber {
+                        for span in row.leftWordHighlights { try expect(NSMaxRange(span.range) <= lLines[n - 1].utf16.count) }
+                    }
+                    if let n = row.rightLineNumber {
+                        for span in row.rightWordHighlights { try expect(NSMaxRange(span.range) <= rLines[n - 1].utf16.count) }
+                    }
+                }
+                // Hunks carry the exact lines, and copying all of them left→right yields the right text.
+                var merged = lText
+                for hunk in result.hunks.reversed() {
+                    try expect(hunk.leftLines == Array(lLines[hunk.leftLineRange]))
+                    try expect(hunk.rightLines == Array(rLines[hunk.rightLineRange]))
+                    merged = DiffEngine.applyHunk(hunk, leftText: merged, rightText: rText, direction: .rightToLeft).newLeftText
+                }
+                try expect(merged.utf8.elementsEqual(rText.utf8), "Applying every hunk must reproduce the right text")
+                try expect(result.additionsCount == result.alignedRows.filter { $0.rightKind == .addition }.count)
+                try expect(result.deletionsCount == result.alignedRows.filter { $0.leftKind == .deletion }.count)
+            }
+        }
+
+        testRunner("Opening a large file does not lay out the whole document synchronously") {
+            let (left, right, coord, window) = makeEditors(inWindow: true)
+            defer { window?.close() }
+            let big = (0..<30_000).map { "line \($0) with some content to typeset" }.joined(separator: "\n")
+            // (No wall-clock bound: the test suite is built without optimization.)
+            coord.loadText(big, into: .left)
+            _ = right
+            let unlaid = left.layoutManager.firstUnlaidCharacterIndex()
+            try expect(unlaid < left.textStorage.length, "Load must leave layout lazy (first unlaid index \(unlaid))")
+            try expect(left.textView.selectedRange().location == 0, "Caret goes to the top of an opened file")
+        }
     }
 
 
@@ -376,5 +479,18 @@ private final class EditCounter: NSObject, NSTextStorageDelegate {
     var edits = 0
     func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range editedRange: NSRange, changeInLength delta: Int) {
         edits += 1
+    }
+}
+
+/// Deterministic PRNG so fuzz failures are reproducible.
+struct SplitMix {
+    var state: UInt64
+    init(seed: UInt64) { state = seed }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 }

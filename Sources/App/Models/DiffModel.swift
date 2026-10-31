@@ -1,43 +1,5 @@
 import Foundation
 
-/// Hashable wrapper comparing text by its exact UTF-8 bytes.
-///
-/// Swift's `String ==` uses Unicode canonical equivalence ("é" == "e\u{301}"),
-/// which would hide exactly the kind of invisible difference a diff tool must reveal.
-struct LiteralText: Hashable {
-    let value: Substring
-
-    static func == (lhs: LiteralText, rhs: LiteralText) -> Bool {
-        return lhs.value.utf8.elementsEqual(rhs.value.utf8)
-    }
-
-    func hash(into hasher: inout Hasher) {
-        let hashed: Void? = value.utf8.withContiguousStorageIfAvailable { buffer in
-            hasher.combine(bytes: UnsafeRawBufferPointer(buffer))
-        }
-        if hashed == nil {
-            Array(value.utf8).withUnsafeBytes { hasher.combine(bytes: $0) }
-        }
-    }
-}
-
-/// Maps texts to dense integer ids so the diff compares ints instead of strings.
-struct TextInterner {
-    private var table: [LiteralText: Int] = [:]
-
-    init(capacity: Int) {
-        table.reserveCapacity(capacity)
-    }
-
-    mutating func id(for text: Substring) -> Int {
-        let key = LiteralText(value: text)
-        if let existing = table[key] { return existing }
-        let newId = table.count
-        table[key] = newId
-        return newId
-    }
-}
-
 /// Linear-space Myers diff (bisection / middle snake) with a per-step cost cap.
 ///
 /// When a sub-problem would cost more than `costBudget` comparisons, it is reported as a
@@ -183,6 +145,45 @@ public final class DiffEngine {
             .map { Substring($0) }
     }
 
+    /// UTF-16 units of `string`, copied in one bulk call.
+    public static func utf16Units(of string: NSString) -> [UInt16] {
+        let length = string.length
+        guard length > 0 else { return [] }
+        return [UInt16](unsafeUninitializedCapacity: length) { buffer, count in
+            string.getCharacters(buffer.baseAddress!, range: NSRange(location: 0, length: length))
+            count = length
+        }
+    }
+
+    /// Native, contiguous UTF-8 Swift string with the contents of `string` (lone surrogates
+    /// become U+FFFD, exactly as Swift's own bridging would do).
+    public static func nativeString(from string: NSString) -> String {
+        return nativeString(fromUTF16: utf16Units(of: string))
+    }
+
+    public static func nativeString(fromUTF16 units: [UInt16]) -> String {
+        return units.withUnsafeBufferPointer { TextBuffers.string(fromUTF16: $0) }
+    }
+
+    /// Number of lines with the same semantics as `lineRanges(in:)`, without allocating per line.
+    public static func lineCount(in string: NSString) -> Int {
+        let length = string.length
+        if length == 0 { return 0 }
+        let chunk = 16_384
+        var buffer = [unichar](repeating: 0, count: chunk)
+        var count = 1
+        var location = 0
+        while location < length {
+            let n = min(chunk, length - location)
+            buffer.withUnsafeMutableBufferPointer { buf in
+                string.getCharacters(buf.baseAddress!, range: NSRange(location: location, length: n))
+                for i in 0..<n where buf[i] == 0x0A { count += 1 }
+            }
+            location += n
+        }
+        return count
+    }
+
     /// Reconstructs text from lines
     public static func joinLines(_ lines: [String]) -> String {
         return lines.joined(separator: "\n")
@@ -223,145 +224,215 @@ public final class DiffEngine {
         rightText: String,
         includeWordDiff: Bool = true
     ) -> DiffResult {
-        let leftSubs = splitLineSubstrings(leftText)
-        let rightSubs = splitLineSubstrings(rightText)
+        // Native contiguous UTF-8 (a no-op for strings that already are), then work on raw bytes.
+        var left = leftText
+        var right = rightText
+        left.makeContiguousUTF8()
+        right.makeContiguousUTF8()
+        return left.withUTF8 { l in
+            right.withUTF8 { r in
+                computeDiff(left: l, right: r, includeWordDiff: includeWordDiff)
+            }
+        }
+    }
 
-        if leftText.utf8.elementsEqual(rightText.utf8) {
+    private static func computeDiff(
+        left lb: UnsafeBufferPointer<UInt8>,
+        right rb: UnsafeBufferPointer<UInt8>,
+        includeWordDiff: Bool
+    ) -> DiffResult {
+        let leftLines = TextBuffers.lineRanges(utf8: lb)
+        let rightLines = TextBuffers.lineRanges(utf8: rb)
+        let leftMaxColumns = TextBuffers.maxColumns(utf8: lb)
+        let rightMaxColumns = TextBuffers.maxColumns(utf8: rb)
+
+        func string(_ buffer: UnsafeBufferPointer<UInt8>, _ range: Range<Int>) -> String {
+            return String(decoding: UnsafeBufferPointer(rebasing: buffer[range]), as: UTF8.self)
+        }
+
+        // Byte equality, never `String ==`: canonical equivalence ("é" == "e\u{301}") would hide
+        // exactly the kind of invisible difference a diff tool must reveal.
+        if lb.count == rb.count && (lb.count == 0 || memcmp(lb.baseAddress!, rb.baseAddress!, lb.count) == 0) {
             var alignedRows: [AlignedDiffRow] = []
-            alignedRows.reserveCapacity(leftSubs.count)
-            for (idx, sub) in leftSubs.enumerated() {
-                let line = String(sub)
+            alignedRows.reserveCapacity(leftLines.count)
+            for idx in leftLines.indices {
                 alignedRows.append(
                     AlignedDiffRow(
                         leftLineNumber: idx + 1,
-                        leftText: line,
                         leftKind: .unchanged,
                         rightLineNumber: idx + 1,
-                        rightText: line,
                         rightKind: .unchanged,
                         hunkIndex: nil
                     )
                 )
             }
-            return DiffResult(hunks: [], alignedRows: alignedRows, additionsCount: 0, deletionsCount: 0)
+            var result = DiffResult(hunks: [], alignedRows: alignedRows, additionsCount: 0, deletionsCount: 0)
+            result.leftMaxColumns = leftMaxColumns
+            result.rightMaxColumns = rightMaxColumns
+            return result
         }
 
-        var interner = TextInterner(capacity: leftSubs.count + rightSubs.count)
-        let leftIds = leftSubs.map { interner.id(for: $0) }
-        let rightIds = rightSubs.map { interner.id(for: $0) }
+        // Intern lines to dense ids so Myers compares ints, not strings.
+        var interner = ByteInterner(capacity: leftLines.count + rightLines.count)
+        let leftBase = lb.baseAddress.map { UnsafeRawPointer($0) }
+        let rightBase = rb.baseAddress.map { UnsafeRawPointer($0) }
+        let leftIds = leftLines.map { interner.id(for: leftBase?.advanced(by: $0.lowerBound), count: $0.count) }
+        let rightIds = rightLines.map { interner.id(for: rightBase?.advanced(by: $0.lowerBound), count: $0.count) }
         let (removed, inserted) = MyersDiff.diff(leftIds, rightIds)
-
-        let leftLines = leftSubs.map { String($0) }
-        let rightLines = rightSubs.map { String($0) }
-
-        let leftCommon = (0..<leftLines.count).filter { !removed[$0] }
-        let rightCommon = (0..<rightLines.count).filter { !inserted[$0] }
 
         var hunks: [DiffHunk] = []
         var alignedRows: [AlignedDiffRow] = []
         alignedRows.reserveCapacity(max(leftLines.count, rightLines.count))
+        /// (row, left line, right line) pairs that need intra-line highlighting.
+        var wordDiffJobs: [(row: Int, left: Int, right: Int)] = []
 
-        var currentLeft = 0
-        var currentRight = 0
         var additionsCount = 0
         var deletionsCount = 0
-        var hunkId = 0
+        var i = 0
+        var j = 0
+        let n = leftLines.count
+        let m = rightLines.count
 
-        let commonCount = leftCommon.count
-        for k in 0...commonCount {
-            let nextLeftCommon = (k < commonCount) ? leftCommon[k] : leftLines.count
-            let nextRightCommon = (k < commonCount) ? rightCommon[k] : rightLines.count
-
-            let leftDiffCount = nextLeftCommon - currentLeft
-            let rightDiffCount = nextRightCommon - currentRight
-
-            if leftDiffCount > 0 || rightDiffCount > 0 {
-                let leftRange = currentLeft..<nextLeftCommon
-                let rightRange = currentRight..<nextRightCommon
-
-                let hunkKind: HunkKind
-                if leftDiffCount > 0 && rightDiffCount > 0 {
-                    hunkKind = .modification
-                } else if leftDiffCount > 0 {
-                    hunkKind = .deletion
-                } else {
-                    hunkKind = .addition
-                }
-
-                deletionsCount += leftDiffCount
-                additionsCount += rightDiffCount
-
-                let startRow = alignedRows.count
-                let maxDiffRows = max(leftDiffCount, rightDiffCount)
-                for i in 0..<maxDiffRows {
-                    let hasLeft = i < leftDiffCount
-                    let hasRight = i < rightDiffCount
-
-                    let leftText: String? = hasLeft ? leftLines[currentLeft + i] : nil
-                    let rightText: String? = hasRight ? rightLines[currentRight + i] : nil
-
-                    var leftWords: [WordHighlightSpan] = []
-                    var rightWords: [WordHighlightSpan] = []
-
-                    if includeWordDiff, hunkKind == .modification, let lt = leftText, let rt = rightText {
-                        let wordDiff = WordDiffEngine.computeWordDiff(leftLine: lt, rightLine: rt)
-                        leftWords = wordDiff.leftHighlights
-                        rightWords = wordDiff.rightHighlights
-                    }
-
-                    alignedRows.append(
-                        AlignedDiffRow(
-                            leftLineNumber: hasLeft ? currentLeft + i + 1 : nil,
-                            leftText: leftText,
-                            leftKind: hasLeft ? .deletion : .spacer,
-                            leftWordHighlights: leftWords,
-                            rightLineNumber: hasRight ? currentRight + i + 1 : nil,
-                            rightText: rightText,
-                            rightKind: hasRight ? .addition : .spacer,
-                            rightWordHighlights: rightWords,
-                            hunkIndex: hunkId
-                        )
-                    )
-                }
-
-                hunks.append(
-                    DiffHunk(
-                        id: hunkId,
-                        leftLineRange: leftRange,
-                        rightLineRange: rightRange,
-                        alignedRowRange: startRow..<alignedRows.count,
-                        leftLines: Array(leftLines[leftRange]),
-                        rightLines: Array(rightLines[rightRange]),
-                        kind: hunkKind
-                    )
-                )
-                hunkId += 1
-            }
-
-            // Append unchanged common line if not at the end
-            if k < commonCount {
+        while i < n || j < m {
+            if i < n && j < m && !removed[i] && !inserted[j] {
                 alignedRows.append(
                     AlignedDiffRow(
-                        leftLineNumber: nextLeftCommon + 1,
-                        leftText: leftLines[nextLeftCommon],
+                        leftLineNumber: i + 1,
                         leftKind: .unchanged,
-                        rightLineNumber: nextRightCommon + 1,
-                        rightText: rightLines[nextRightCommon],
+                        rightLineNumber: j + 1,
                         rightKind: .unchanged,
                         hunkIndex: nil
                     )
                 )
-                currentLeft = nextLeftCommon + 1
-                currentRight = nextRightCommon + 1
+                i += 1
+                j += 1
+                continue
+            }
+
+            // A hunk: every removed line on the left and inserted line on the right up to the next common line.
+            let leftStart = i
+            let rightStart = j
+            while i < n && removed[i] { i += 1 }
+            while j < m && inserted[j] { j += 1 }
+            let leftDiffCount = i - leftStart
+            let rightDiffCount = j - rightStart
+            // Myers marks equally many common lines on both sides, so a step always makes progress.
+            guard leftDiffCount + rightDiffCount > 0 else {
+                assertionFailure("Inconsistent line diff")
+                break
+            }
+
+            let hunkKind: HunkKind
+            if leftDiffCount > 0 && rightDiffCount > 0 {
+                hunkKind = .modification
+            } else if leftDiffCount > 0 {
+                hunkKind = .deletion
+            } else {
+                hunkKind = .addition
+            }
+            deletionsCount += leftDiffCount
+            additionsCount += rightDiffCount
+
+            let hunkId = hunks.count
+            let startRow = alignedRows.count
+            for k in 0..<max(leftDiffCount, rightDiffCount) {
+                let hasLeft = k < leftDiffCount
+                let hasRight = k < rightDiffCount
+                if includeWordDiff && hasLeft && hasRight {
+                    wordDiffJobs.append((alignedRows.count, leftStart + k, rightStart + k))
+                }
+                alignedRows.append(
+                    AlignedDiffRow(
+                        leftLineNumber: hasLeft ? leftStart + k + 1 : nil,
+                        leftKind: hasLeft ? .deletion : .spacer,
+                        rightLineNumber: hasRight ? rightStart + k + 1 : nil,
+                        rightKind: hasRight ? .addition : .spacer,
+                        hunkIndex: hunkId
+                    )
+                )
+            }
+
+            let leftRange = leftStart..<i
+            let rightRange = rightStart..<j
+            hunks.append(
+                DiffHunk(
+                    id: hunkId,
+                    leftLineRange: leftRange,
+                    rightLineRange: rightRange,
+                    alignedRowRange: startRow..<alignedRows.count,
+                    leftLines: leftLines[leftRange].map { string(lb, $0) },
+                    rightLines: rightLines[rightRange].map { string(rb, $0) },
+                    kind: hunkKind
+                )
+            )
+        }
+
+        if !wordDiffJobs.isEmpty {
+            let highlights = computeWordHighlights(
+                jobs: wordDiffJobs,
+                left: lb, leftLines: leftLines,
+                right: rb, rightLines: rightLines
+            )
+            for (index, job) in wordDiffJobs.enumerated() {
+                alignedRows[job.row].leftWordHighlights = highlights[index].0
+                alignedRows[job.row].rightWordHighlights = highlights[index].1
             }
         }
 
-        return DiffResult(
+        var result = DiffResult(
             hunks: hunks,
             alignedRows: alignedRows,
             additionsCount: additionsCount,
             deletionsCount: deletionsCount
         )
+        result.leftMaxColumns = leftMaxColumns
+        result.rightMaxColumns = rightMaxColumns
+        return result
+    }
+
+    /// Word diffs of independent line pairs, spread across all cores.
+    private static func computeWordHighlights(
+        jobs: [(row: Int, left: Int, right: Int)],
+        left lb: UnsafeBufferPointer<UInt8>, leftLines: [Range<Int>],
+        right rb: UnsafeBufferPointer<UInt8>, rightLines: [Range<Int>]
+    ) -> [([WordHighlightSpan], [WordHighlightSpan])] {
+        var output = [([WordHighlightSpan], [WordHighlightSpan])](repeating: ([], []), count: jobs.count)
+        let chunkSize = 64
+        let chunkCount = (jobs.count + chunkSize - 1) / chunkSize
+        // A UTF-8 length over 3x the UTF-16 limit is over the limit for sure; the exact UTF-16
+        // check happens in the word diff.
+        let byteLimit = WordDiffEngine.maxLineLength * 3
+        output.withUnsafeMutableBufferPointer { out in
+            let outBase = out.baseAddress!
+            let work: (Int) -> Void = { chunk in
+                var leftUnits: [UInt16] = []
+                var rightUnits: [UInt16] = []
+                for index in (chunk * chunkSize)..<min(jobs.count, (chunk + 1) * chunkSize) {
+                    let job = jobs[index]
+                    let l = UnsafeBufferPointer(rebasing: lb[leftLines[job.left]])
+                    let r = UnsafeBufferPointer(rebasing: rb[rightLines[job.right]])
+                    if l.count > byteLimit || r.count > byteLimit { continue }
+                    // Byte-identical lines (cannot normally pair up, but be safe): no word spans.
+                    if l.count == r.count && (l.count == 0 || memcmp(l.baseAddress!, r.baseAddress!, l.count) == 0) { continue }
+                    leftUnits.removeAll(keepingCapacity: true)
+                    rightUnits.removeAll(keepingCapacity: true)
+                    TextBuffers.appendUTF16(fromUTF8: l, to: &leftUnits)
+                    TextBuffers.appendUTF16(fromUTF8: r, to: &rightUnits)
+                    let spans = leftUnits.withUnsafeBufferPointer { lu in
+                        rightUnits.withUnsafeBufferPointer { ru in
+                            WordDiffEngine.computeWordDiff(left: lu, right: ru)
+                        }
+                    }
+                    (outBase + index).pointee = spans
+                }
+            }
+            if chunkCount == 1 {
+                work(0)
+            } else {
+                DispatchQueue.concurrentPerform(iterations: chunkCount, execute: work)
+            }
+        }
+        return output
     }
 
     /// Applies a single hunk copy from source text into target text.

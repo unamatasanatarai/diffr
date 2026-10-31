@@ -180,6 +180,27 @@ make test
 
 ---
 
+## Future Development
+
+### Instant first scroll in very large files
+
+**Problem.** The editors use TextKit 1 (`NSLayoutManager`) with *contiguous* layout. To display a line, TextKit must first lay out every line above it (about 55 µs per line). So the first scroll deep into a freshly opened 20,000-line pair stalls for roughly a second. Background layout finishes about 2 s after opening, and after that scrolling is instant.
+
+**Why the easy fix doesn't work.** In non-contiguous layout mode, TextKit lays out only the visible region and *estimates* where earlier lines sit. Diffr's row alignment relies on exact positions: spacer gaps are paragraph spacing, and the diff backgrounds are painted on a fixed row grid. With estimated positions, every visible line lands on the wrong row (verified with the alignment check in the benchmark).
+
+**Option A: exact positioning in TextKit 1 (recommended first step).**
+Turn on `allowsNonContiguousLayout` and implement the `NSLayoutManagerDelegate` method `layoutManager(_:shouldSetLineFragmentRect:lineFragmentUsedRect:baselineOffset:in:forGlyphRange:)`. It places each line fragment at its exact row: `editorTextInsetY + row × editorLineHeight`. The coordinator already knows each line's row from the aligned diff, so TextKit's estimates no longer matter.
+- *Open question:* lines typed after the last diff, before the next one is applied, have no known row yet. They need a fallback, e.g. offsetting from the nearest known line.
+- *Verify with:* the alignment check (0 misaligned lines) and first-scroll timing, both scrolled to the middle and the end.
+
+**Option B: migrate to TextKit 2 (`NSTextLayoutManager`).**
+TextKit 2 was designed to lay out only the visible part of a document. Spacer rows could become real layout fragments (custom `NSTextLayoutFragment` heights) instead of paragraph spacing.
+- *Cost:* a rewrite of the editor layer. Invisibles, diff backgrounds, word highlights and spacer alignment are all built on TextKit 1 APIs (`InvisibilityLayoutManager`, `DiffTextView`).
+- *Risk:* `NSTextView`'s TextKit 2 support is incomplete and buggy on macOS 12, Diffr's minimum, and much better on macOS 13+. Some features (e.g. parts of the find bar) quietly fall back to TextKit 1.
+- Consider this only if Option A doesn't hold up.
+
+---
+
 ## License
 
 Diffr is open-source software licensed under the **GNU General Public License v2.0** (`GPL-2.0`). See the [LICENSE](LICENSE) file for complete terms and conditions.

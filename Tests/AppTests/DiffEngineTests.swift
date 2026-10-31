@@ -35,7 +35,7 @@ public enum DiffEngineTests {
             let spacerRows = result.alignedRows.filter { $0.leftKind == .spacer }
             try expect(spacerRows.count == 1, "Left should have 1 spacer row")
             try expect(spacerRows[0].rightKind == .addition)
-            try expect(spacerRows[0].rightText == "line added")
+            try expect(spacerRows[0].rightLineNumber == 2 && spacerRows[0].leftLineNumber == nil)
         }
 
         testRunner("DiffEngine detects pure line deletions on left") {
@@ -55,7 +55,7 @@ public enum DiffEngineTests {
             let spacerRows = result.alignedRows.filter { $0.rightKind == .spacer }
             try expect(spacerRows.count == 1, "Right should have 1 spacer row")
             try expect(spacerRows[0].leftKind == .deletion)
-            try expect(spacerRows[0].leftText == "beta")
+            try expect(spacerRows[0].leftLineNumber == 2 && spacerRows[0].rightLineNumber == nil)
         }
 
         testRunner("DiffEngine detects modified line and computes intra-line highlights") {

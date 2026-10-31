@@ -50,6 +50,11 @@ public final class DiffEditorView: NSView {
         textStorage = NSTextStorage()
         layoutManager = InvisibilityLayoutManager()
         textStorage.addLayoutManager(layoutManager)
+        // Contiguous layout is deliberate: non-contiguous layout estimates the y of unlaid-out
+        // lines, which breaks the exact row alignment the diff backgrounds are painted on.
+        // Background layout fills the rest in idle time instead.
+        layoutManager.allowsNonContiguousLayout = false
+        layoutManager.backgroundLayoutEnabled = true
 
         let containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         let textContainer = NSTextContainer(size: containerSize)
@@ -269,21 +274,32 @@ public final class DiffEditorView: NSView {
 
     /// Size the document needs on its own: enough rows for the aligned diff and the widest line.
     public func naturalDocumentSize(rowCount: Int? = nil) -> NSSize {
-        let lineCount = max(rowCount ?? gutterView.rowInfos.count, 1)
-        var contentHeight = DiffTheme.editorTextInsetY * 2 + CGFloat(lineCount) * DiffTheme.editorLineHeight
+        // Never force layout here: this runs on every keystroke and every diff, and a full
+        // TextKit layout of a large file costs ~50µs per line. Every row is exactly
+        // `editorLineHeight` tall, so the height is known from counts alone; the width comes
+        // from the last diff's estimate plus whatever TextKit has already laid out (which
+        // always includes the line being typed in).
+        // Lines typed since the last diff are not in rowCount yet; never cut them off.
+        let linesSinceDiff = max(0, lineCount - diffedLineCount)
+        let rows = max((rowCount ?? gutterView.rowInfos.count) + linesSinceDiff, lineCount, 1)
+        let contentHeight = DiffTheme.editorTextInsetY * 2 + CGFloat(rows) * DiffTheme.editorLineHeight
 
-        var usedWidth: CGFloat = 0
+        var usedWidth = CGFloat(estimatedMaxColumns) * DiffTheme.editorFont.maximumAdvancement.width
+            + textView.textContainerInset.width * 2 + (textView.textContainer?.lineFragmentPadding ?? 0) * 2
         if let container = textView.textContainer {
-            layoutManager.ensureLayout(for: container)
-            let used = layoutManager.usedRect(for: container)
-            usedWidth = used.width
-            // Lines typed since the last diff are not in rowCount yet; never cut them off.
-            contentHeight = max(contentHeight, used.maxY + textView.textContainerOrigin.y + DiffTheme.editorTextInsetY)
+            usedWidth = max(usedWidth, layoutManager.usedRect(for: container).width)
         }
         let height = max(scrollView.contentView.bounds.height, contentHeight + 80.0)
         let width = max(scrollView.contentView.bounds.width, usedWidth + 80.0)
         return NSSize(width: ceil(width), height: ceil(height))
     }
+
+    /// Number of lines (same semantics as `DiffEngine.lineRanges`), kept current on every edit.
+    public private(set) var lineCount: Int = 0
+    /// `lineCount` when the currently applied diff was computed.
+    public var diffedLineCount: Int = 0
+    /// Upper-bound display width of the widest line, in monospace columns, from the last diff.
+    public var estimatedMaxColumns: Int = 0
 
     /// Spacer rows above the first real line. TextKit ignores `paragraphSpacingBefore` on the
     /// first paragraph, so this offset is applied through the text container inset instead.
@@ -329,7 +345,8 @@ public final class DiffEditorView: NSView {
 
     public func setHoveredHunkIndex(_ hunkIndex: Int?) {
         guard let hIdx = hunkIndex,
-              let hunk = allHunks.first(where: { $0.id == hIdx }) else {
+              let hunk = (hIdx >= 0 && hIdx < allHunks.count && allHunks[hIdx].id == hIdx)
+                ? allHunks[hIdx] : allHunks.first(where: { $0.id == hIdx }) else {
             hideHunkActionButton()
             return
         }
@@ -401,9 +418,19 @@ public final class DiffEditorView: NSView {
     // MARK: - Text
 
     /// Setting replaces the full contents through the undo-aware edit path.
+    /// Reading returns the exact contents (lone surrogates included), e.g. for saving.
+    /// Hot paths that only need to read the text quickly should use `diffText` instead.
     public var text: String {
         get { return textView.string }
         set { replaceText(with: newValue, actionName: nil) }
+    }
+
+    /// Native UTF-8 copy of the contents for the diff engine: a bulk UTF-16 copy plus a fast
+    /// transcode. (Iterating the bridged `textView.string` pulls the mutable backing string
+    /// through `characterAtIndex:` one unit at a time — over a second for a few MB.)
+    /// Lone surrogates become U+FFFD, exactly as Swift's own bridging would make them.
+    public var diffText: String {
+        return DiffEngine.nativeString(from: textStorage.mutableString)
     }
 
     /// Replaces the contents with `newValue`, editing only the range that actually differs.
@@ -443,8 +470,15 @@ public final class DiffEditorView: NSView {
 
         let attributed = NSAttributedString(string: replacement, attributes: baseTextAttributes)
         textView.breakUndoCoalescing()
+        // Replacing everything (opening a file, Copy All): TextKit would leave the caret after
+        // the inserted text, and `didChangeText` then lays out the whole document synchronously
+        // just to place it. Put the caret at the top instead; layout proceeds lazily.
+        let replacesEverything = range.location == 0 && range.length == oldLength
         if textView.shouldChangeText(in: range, replacementString: replacement) {
             textStorage.replaceCharacters(in: range, with: attributed)
+            if replacesEverything {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+            }
             textView.didChangeText()
             if let name = actionName {
                 textView.undoManager?.setActionName(name)
@@ -459,8 +493,8 @@ public final class DiffEditorView: NSView {
 
     @objc private func textDidChangeNotification(_ notification: Notification) {
         placeholderLabel.isHidden = textStorage.length > 0
-        let lineCount = max(textView.string.components(separatedBy: "\n").count, 1)
-        gutterView.currentMaxLineNumber = lineCount
+        lineCount = DiffEngine.lineCount(in: textStorage.mutableString)
+        gutterView.currentMaxLineNumber = max(lineCount, 1)
         gutterView.needsDisplay = true
         onTextChange?()
     }
