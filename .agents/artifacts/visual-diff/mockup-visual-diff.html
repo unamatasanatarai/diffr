@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Diffr - Visual Diff Editor Mockup</title>
+  <style>
+    :root {
+      --bg: #1e1e1e;
+      --panel-bg: #252526;
+      --text: #d4d4d4;
+      --text-dim: #858585;
+      --border: #3c3c3c;
+      --gutter-bg: #2d2d2d;
+      --add-bg: rgba(46, 160, 67, 0.22);
+      --add-border: #2ea043;
+      --del-bg: rgba(248, 81, 73, 0.22);
+      --del-border: #f85149;
+      --button-bg: #3a3d41;
+      --button-hover: #4e5157;
+      --accent: #007acc;
+      --invisible-char: rgba(255, 255, 255, 0.25);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #f3f3f3;
+        --panel-bg: #ffffff;
+        --text: #24292f;
+        --text-dim: #6e7781;
+        --border: #d0d7de;
+        --gutter-bg: #eaeaea;
+        --add-bg: rgba(46, 160, 67, 0.15);
+        --add-border: #abf2bc;
+        --del-bg: rgba(248, 81, 73, 0.15);
+        --del-border: #ff8182;
+        --button-bg: #e1e4e8;
+        --button-hover: #d0d7de;
+        --accent: #0969da;
+        --invisible-char: rgba(0, 0, 0, 0.25);
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    /* Window Titlebar & Header */
+    .header {
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      user-select: none;
+    }
+    .stats-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: var(--gutter-bg);
+      border: 1px solid var(--border);
+    }
+    .stats-badge.identical {
+      color: #2ea043;
+      border-color: #2ea043;
+    }
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      font-size: 13px;
+    }
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    /* Find Bar */
+    .find-bar {
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+    .find-input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      width: 200px;
+    }
+    /* Editor Split Layout */
+    .editor-container {
+      flex: 1;
+      display: grid;
+      grid-template-columns: 1fr 52px 1fr;
+      overflow: hidden;
+      font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 22px;
+    }
+    .pane {
+      background: var(--panel-bg);
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+    }
+    .pane-header {
+      background: var(--gutter-bg);
+      border-bottom: 1px solid var(--border);
+      padding: 4px 12px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      font-weight: bold;
+    }
+    .code-lines {
+      padding: 8px 0;
+      white-space: pre;
+    }
+    .line {
+      display: flex;
+      padding: 0 12px;
+      height: 22px;
+    }
+    .line-num {
+      width: 34px;
+      color: var(--text-dim);
+      user-select: none;
+      text-align: right;
+      padding-right: 12px;
+      flex-shrink: 0;
+    }
+    .line-text {
+      flex: 1;
+      outline: none;
+    }
+    .line-del {
+      background: var(--del-bg);
+      border-left: 3px solid var(--del-border);
+    }
+    .line-add {
+      background: var(--add-bg);
+      border-left: 3px solid var(--add-border);
+    }
+    .invisible-char {
+      color: var(--invisible-char);
+      font-weight: normal;
+    }
+    /* Gutter */
+    .gutter {
+      background: var(--gutter-bg);
+      border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      user-select: none;
+      position: relative;
+    }
+    .gutter-header {
+      height: 29px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      border-bottom: 1px solid var(--border);
+      width: 100%;
+      background: var(--panel-bg);
+    }
+    .action-btn {
+      width: 22px;
+      height: 20px;
+      background: var(--button-bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 4px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      transition: all 0.15s ease;
+      margin: 1px 0;
+    }
+    .action-btn:hover {
+      background: var(--button-hover);
+      color: var(--accent);
+      border-color: var(--accent);
+    }
+    .global-btn {
+      width: 22px;
+      height: 20px;
+      font-weight: bold;
+      font-size: 10px;
+    }
+    .chunk-actions {
+      position: absolute;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    /* Show per-change arrows on hover over hunk or gutter */
+    .line-del:hover ~ .gutter .chunk-actions,
+    .line-add:hover ~ .gutter .chunk-actions,
+    .gutter:hover .chunk-actions,
+    .chunk-actions:hover,
+    .diff-row:hover .chunk-actions {
+      opacity: 1;
+    }
+    .line-spacer {
+      background: var(--gutter-bg);
+      opacity: 0.4;
+      user-select: none;
+    }
+    .line-spacer .line-num {
+      background: transparent;
+    }
+    .line-spacer .line-text {
+      background: repeating-linear-gradient(
+        -45deg,
+        transparent,
+        transparent 5px,
+        rgba(128, 128, 128, 0.08) 5px,
+        rgba(128, 128, 128, 0.08) 10px
+      );
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Controls & Stats -->
+  <div class="header">
+    <div class="stats-badge" id="stats">
+      <span>●</span> 2 changes found (+1, -1)
+    </div>
+    <div class="controls">
+      <label class="checkbox-label">
+        <input type="checkbox" id="invisibles-toggle" checked onchange="toggleInvisibles(this.checked)">
+        Show Invisible Characters
+      </label>
+      <button class="action-btn" style="width: auto; padding: 2px 8px;" onclick="toggleStats()">Simulate Identical</button>
+    </div>
+  </div>
+
+  <!-- 3-Column Visual Diff Layout (GitHub Split Diff Style) -->
+  <div class="editor-container" id="editor-grid">
+    
+    <!-- Left Pane (Source) -->
+    <div class="pane">
+      <div class="pane-header" style="color: #cf222e;">Source (Left Pane)</div>
+      
+      <!-- Native Per-Pane Find Bar inside active pane -->
+      <div class="find-bar" style="border-bottom: 1px solid var(--border); padding: 5px 12px; background: var(--panel-bg);">
+        <span style="font-size: 11px; color: var(--text-dim);">Find:</span>
+        <input type="text" class="find-input" style="width: 130px; font-size: 11px; padding: 2px 6px;" placeholder="Search Left pane..." value="targetConfig">
+        <span style="font-size: 11px; color: var(--text-dim);">Replace:</span>
+        <input type="text" class="find-input" style="width: 110px; font-size: 11px; padding: 2px 6px;" placeholder="Replace...">
+        <button class="action-btn" style="width: auto; padding: 2px 6px; font-size: 10px;">Find</button>
+        <button class="action-btn" style="width: auto; padding: 2px 6px; font-size: 10px;">Replace</button>
+        <span style="font-size: 10px; color: var(--text-dim); margin-left: auto;">1 of 1</span>
+      </div>
+
+      <div class="code-lines">
+        <div class="line"><span class="line-num">1</span><span class="line-text" contenteditable="true">target_version=""</span></div>
+        <div class="line"><span class="line-num">2</span><span class="line-text" contenteditable="true">release_intro="${SUMMARY:-${NOTES:-}}"</span></div>
+        <div class="line"><span class="line-num">3</span><span class="line-text" contenteditable="true"></span></div>
+        <div class="line line-del" onmouseenter="showHunkArrows(true)" onmouseleave="showHunkArrows(false)"><span class="line-num" style="background: rgba(255,220,224,0.4); color: #cf222e; font-weight: bold;">4 -</span><span class="line-text" contenteditable="true">: "${GEMINI_MODEL:=gemini-<span style="background: rgba(207,34,46,0.35); border-radius: 2px; padding: 0 2px;">3.8</span>-flash}"</span></div>
+        <div class="line line-spacer"><span class="line-num"></span><span class="line-text"></span></div>
+        <div class="line"><span class="line-num">5</span><span class="line-text" contenteditable="true">readonly GEMINI_API_URL="https://generativelanguage.googleapis.com..."</span></div>
+        <div class="line"><span class="line-num">6</span><span class="line-text" contenteditable="true">}</span></div>
+      </div>
+    </div>
+
+    <!-- Middle Separator Gutter -->
+    <div class="gutter" onmouseenter="showHunkArrows(true)" onmouseleave="showHunkArrows(false)">
+      <!-- Global Copy All Buttons in Header -->
+      <div class="gutter-header" title="Copy entire document">
+        <button class="action-btn global-btn" title="Copy entire Left document to Right (All ➔)">➔</button>
+        <button class="action-btn global-btn" title="Copy entire Right document to Left (⬅ All)">⬅</button>
+      </div>
+
+      <!-- Buttons positioned for Line 4 Hunk (Visible on Hover) -->
+      <div class="chunk-actions" id="hunk-1" style="top: 104px;">
+        <button class="action-btn" title="Move this change to Right (➔)" style="color: #0969da; font-weight: bold;">➔</button>
+        <button class="action-btn" title="Move this change to Left (⬅)" style="color: #0969da; font-weight: bold;">⬅</button>
+      </div>
+    </div>
+
+    <!-- Right Pane (New) -->
+    <div class="pane">
+      <div class="pane-header" style="color: #1a7f37;">New (Right Pane)</div>
+      <div class="code-lines">
+        <div class="line"><span class="line-num">1</span><span class="line-text" contenteditable="true">target_version=""</span></div>
+        <div class="line"><span class="line-num">2</span><span class="line-text" contenteditable="true">release_intro="${SUMMARY:-${NOTES:-}}"</span></div>
+        <div class="line"><span class="line-num">3</span><span class="line-text" contenteditable="true"></span></div>
+        <div class="line line-spacer"><span class="line-num"></span><span class="line-text"></span></div>
+        <div class="line line-add" onmouseenter="showHunkArrows(true)" onmouseleave="showHunkArrows(false)"><span class="line-num" style="background: rgba(204,255,216,0.4); color: #1a7f37; font-weight: bold;">4 +</span><span class="line-text" contenteditable="true">: "${GEMINI_MODEL:=gemini-<span style="background: rgba(26,127,55,0.35); border-radius: 2px; padding: 0 2px;">2.5</span>-flash}"</span></div>
+        <div class="line"><span class="line-num">5</span><span class="line-text" contenteditable="true">readonly GEMINI_API_URL="https://generativelanguage.googleapis.com..."</span></div>
+        <div class="line"><span class="line-num">6</span><span class="line-text" contenteditable="true">}</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    function showHunkArrows(show) {
+      const hunk = document.getElementById('hunk-1');
+      if (hunk) {
+        hunk.style.opacity = show ? '1' : '0';
+      }
+    }
+    function toggleInvisibles(show) {
+      document.querySelectorAll('.invisible-char').forEach(el => {
+        el.style.display = show ? 'inline' : 'none';
+      });
+    }
+
+    let isIdentical = false;
+    function toggleStats() {
+      isIdentical = !isIdentical;
+      const badge = document.getElementById('stats');
+      if (isIdentical) {
+        badge.className = 'stats-badge identical';
+        badge.innerHTML = '<span>✔</span> files identical';
+      } else {
+        badge.className = 'stats-badge';
+        badge.innerHTML = '<span>●</span> 2 changes found (+1, -1)';
+      }
+    }
+  </script>
+</body>
+</html>
