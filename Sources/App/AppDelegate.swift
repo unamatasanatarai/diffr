@@ -1,7 +1,12 @@
 import Cocoa
 
 public final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var mainWindowController: MainWindowController?
+    public private(set) var mainWindowController: MainWindowController?
+
+    // Double ⌘Q to quit
+    private var lastQuitAttemptTimestamp: TimeInterval = 0
+    public var doubleQuitTimeout: TimeInterval = 1.75
+    public var terminateHandler: ((Any?) -> Void)?
 
     // The window exists before launch finishes so files passed at launch (open urls) have a target.
     public func applicationWillFinishLaunching(_ notification: Notification) {
@@ -17,10 +22,65 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func application(_ application: NSApplication, open urls: [URL]) {
         // Files dropped on the Dock icon / "Open With": first → left, second → right.
-        guard let controller = mainWindowController else { return }
-        if let first = urls.first { controller.loadFile(at: first, into: .left) }
-        if urls.count > 1 { controller.loadFile(at: urls[1], into: .right) }
+        mainWindowController?.loadFiles(urls)
     }
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller = mainWindowController, controller.hasUnsavedChanges else { return .terminateNow }
+        controller.showWindow(nil)
+        controller.confirmUnsavedChanges(for: EditorSide.allCases) { proceed in
+            sender.reply(toApplicationShouldTerminate: proceed)
+        }
+        return .terminateLater
+    }
+
+    // MARK: - Double ⌘Q Quit Handling
+
+    @objc public func quitRequested(_ sender: Any?) {
+        let isShortcut = (NSApp.currentEvent?.type == .keyDown)
+        handleQuitRequest(isKeyboardShortcut: isShortcut, sender: sender)
+    }
+
+    public func handleQuitRequest(isKeyboardShortcut: Bool, sender: Any? = nil) {
+        let doTerminate: (Any?) -> Void = { [weak self] s in
+            if let custom = self?.terminateHandler {
+                custom(s)
+            } else {
+                NSApp.terminate(s)
+            }
+        }
+
+        // If clicked from the menu bar with mouse, quit immediately (prompting for unsaved changes if needed)
+        guard isKeyboardShortcut else {
+            mainWindowController?.dismissQuitHUD(animated: false)
+            doTerminate(sender)
+            return
+        }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = now - lastQuitAttemptTimestamp
+
+        if lastQuitAttemptTimestamp > 0 && elapsed <= doubleQuitTimeout {
+            // Second ⌘Q confirmed within timeout
+            lastQuitAttemptTimestamp = 0
+            mainWindowController?.dismissQuitHUD(animated: false)
+            doTerminate(sender)
+        } else {
+            // First ⌘Q: record timestamp and prompt user
+            lastQuitAttemptTimestamp = now
+            if let controller = mainWindowController, controller.window?.isVisible == true {
+                controller.showQuitHUD(timeout: doubleQuitTimeout) { [weak self] in
+                    self?.lastQuitAttemptTimestamp = 0
+                }
+            } else {
+                // Window not visible; reset timestamp after timeout
+                Timer.scheduledTimer(withTimeInterval: doubleQuitTimeout, repeats: false) { [weak self] _ in
+                    self?.lastQuitAttemptTimestamp = 0
+                }
+            }
+        }
+    }
+
 
     private func item(_ title: String, _ action: Selector?, _ key: String = "", _ modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
         let menuItem = NSMenuItem(title: title, action: action, keyEquivalent: key)
@@ -40,13 +100,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]))
         appMenu.addItem(item("Show All", #selector(NSApplication.unhideAllApplications(_:))))
         appMenu.addItem(.separator())
-        appMenu.addItem(item("Quit \(appName)", #selector(NSApplication.terminate(_:)), "q"))
+        let quitItem = item("Quit \(appName)", #selector(quitRequested(_:)), "q")
+        quitItem.target = self
+        appMenu.addItem(quitItem)
         addSubmenu(appMenu, to: mainMenu)
 
         // 2. File Menu
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(item("Open in Left Pane…", #selector(MainWindowController.openInLeftPane(_:)), "o"))
         fileMenu.addItem(item("Open in Right Pane…", #selector(MainWindowController.openInRightPane(_:)), "o", [.command, .option]))
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(item("Save Pane", #selector(MainWindowController.savePane(_:)), "s"))
+        fileMenu.addItem(item("Save Pane As…", #selector(MainWindowController.savePaneAs(_:)), "s", [.command, .shift]))
+        fileMenu.addItem(item("Save Both Panes", #selector(MainWindowController.saveBothPanes(_:)), "s", [.command, .option]))
         fileMenu.addItem(.separator())
         fileMenu.addItem(item("Clear Both Panes", #selector(MainWindowController.clearAllClicked)))
         fileMenu.addItem(.separator())
@@ -100,6 +166,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         changesMenu.addItem(.separator())
         changesMenu.addItem(item("Copy All to Right", #selector(MainWindowController.copyAllRightClicked)))
         changesMenu.addItem(item("Copy All to Left", #selector(MainWindowController.copyAllLeftClicked)))
+        changesMenu.addItem(.separator())
+        changesMenu.addItem(item("Flip Sides", #selector(MainWindowController.flipSidesClicked)))
         addSubmenu(changesMenu, to: mainMenu)
 
         // 6. Window Menu

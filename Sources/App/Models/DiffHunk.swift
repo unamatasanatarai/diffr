@@ -13,7 +13,7 @@ public enum HunkKind: Equatable {
     case modification
 }
 
-public enum EditorSide: Equatable {
+public enum EditorSide: Hashable, CaseIterable {
     case left
     case right
 }

@@ -295,11 +295,22 @@ public final class DiffCoordinator: NSObject {
         leftEditor.gutterView.rowInfos = leftRowInfos
         leftEditor.actionMarginView?.rowInfos = leftRowInfos
         rightEditor.gutterView.rowInfos = rightRowInfos
+        rightEditor.actionMarginView?.rowInfos = rightRowInfos
+
+        let maxLeft = leftRowInfos.compactMap { $0.lineNumber }.max() ?? 1
+        let maxRight = rightRowInfos.compactMap { $0.lineNumber }.max() ?? 1
+        let maxLine = max(maxLeft, maxRight, 1)
+        leftEditor.gutterView.currentMaxLineNumber = maxLine
+        rightEditor.gutterView.currentMaxLineNumber = maxLine
+        let commonGutterWidth = LineNumberRulerView.requiredWidth(forMaxLineNumber: maxLine)
+        leftEditor.setGutterWidth(commonGutterWidth)
+        rightEditor.setGutterWidth(commonGutterWidth)
 
         syncDocumentSizes()
 
         leftEditor.textView.needsDisplay = true
         rightEditor.textView.needsDisplay = true
+
 
         leftEditor.allHunks = result.hunks
         rightEditor.allHunks = result.hunks
@@ -449,6 +460,21 @@ public final class DiffCoordinator: NSObject {
         leftEditor.replaceText(with: "", actionName: nil)
         rightEditor.replaceText(with: "", actionName: nil)
         undoManager?.setActionName("Clear")
+        undoManager?.endUndoGrouping()
+        activeHunkIndex = nil
+        hoveredHunkIndex = nil
+        recalculateDiff()
+    }
+
+    /// Swaps the text of both panes as a single undoable step.
+    public func flipSides() {
+        let leftText = leftEditor.text
+        let rightText = rightEditor.text
+        let undoManager = leftEditor.textView.undoManager
+        undoManager?.beginUndoGrouping()
+        leftEditor.replaceText(with: rightText, actionName: nil)
+        rightEditor.replaceText(with: leftText, actionName: nil)
+        undoManager?.setActionName("Flip Sides")
         undoManager?.endUndoGrouping()
         activeHunkIndex = nil
         hoveredHunkIndex = nil

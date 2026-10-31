@@ -25,6 +25,15 @@ public final class DiffEditorView: NSView {
     public var hunkActionButtonHunkId: Int?
     public var allHunks: [DiffHunk] = []
     public let placeholderLabel: NSTextField = PassthroughLabel(labelWithString: "")
+    public private(set) var gutterWidthConstraint: NSLayoutConstraint!
+
+    public func setGutterWidth(_ width: CGFloat) {
+        if gutterWidthConstraint != nil && gutterWidthConstraint.constant != width {
+            gutterWidthConstraint.constant = width
+            needsLayout = true
+        }
+    }
+
 
     private var trackingArea: NSTrackingArea?
     private var paragraphStyleCache: [CGFloat: NSParagraphStyle] = [:]
@@ -33,7 +42,9 @@ public final class DiffEditorView: NSView {
         self.side = side
 
         gutterView = LineNumberRulerView(side: side)
-        actionMarginView = (side == .left) ? DiffActionMarginView() : nil
+        let margin = DiffActionMarginView()
+        margin.side = side
+        actionMarginView = margin
         scrollView = NSScrollView()
 
         textStorage = NSTextStorage()
@@ -152,6 +163,9 @@ public final class DiffEditorView: NSView {
         gutterView.onHoverRow = { [weak self] row in
             self?.onHoverRow?(row)
         }
+        gutterView.onGutterWidthNeeded = { [weak self] width in
+            self?.setGutterWidth(width)
+        }
 
         addSubview(gutterView)
         addSubview(scrollView)
@@ -197,12 +211,19 @@ public final class DiffEditorView: NSView {
         placeholderLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(placeholderLabel)
 
-        let trailingAnchorForText = actionMarginView?.leadingAnchor ?? trailingAnchor
+        gutterWidthConstraint = gutterView.widthAnchor.constraint(
+            equalToConstant: LineNumberRulerView.requiredWidth(forMaxLineNumber: 1)
+        )
+
+        // Left pane:  [gutter][text][margin] | seam
+        // Right pane: seam | [margin][gutter][text]
+        let trailingAnchorForText = (side == .left) ? (actionMarginView?.leadingAnchor ?? trailingAnchor) : trailingAnchor
+        let gutterLeading = (side == .right) ? (actionMarginView?.trailingAnchor ?? leadingAnchor) : leadingAnchor
         var constraints: [NSLayoutConstraint] = [
             gutterView.topAnchor.constraint(equalTo: topAnchor),
-            gutterView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            gutterView.leadingAnchor.constraint(equalTo: gutterLeading),
             gutterView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            gutterView.widthAnchor.constraint(equalToConstant: 80),
+            gutterWidthConstraint,
 
             scrollView.topAnchor.constraint(equalTo: topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: gutterView.trailingAnchor),
@@ -216,9 +237,11 @@ public final class DiffEditorView: NSView {
         if let marginView = actionMarginView {
             constraints += [
                 marginView.topAnchor.constraint(equalTo: topAnchor),
-                marginView.trailingAnchor.constraint(equalTo: trailingAnchor),
+                side == .left
+                    ? marginView.trailingAnchor.constraint(equalTo: trailingAnchor)
+                    : marginView.leadingAnchor.constraint(equalTo: leadingAnchor),
                 marginView.bottomAnchor.constraint(equalTo: bottomAnchor),
-                marginView.widthAnchor.constraint(equalToConstant: 32)
+                marginView.widthAnchor.constraint(equalToConstant: DiffActionMarginView.width)
             ]
         }
         NSLayoutConstraint.activate(constraints)
@@ -324,7 +347,7 @@ public final class DiffEditorView: NSView {
         let totalHunkHeight = CGFloat(rowCount) * DiffTheme.editorLineHeight
         let yInDoc = DiffTheme.editorTextInsetY + CGFloat(startRow) * DiffTheme.editorLineHeight
         let yInView = yInDoc - documentOffsetY
-        let btnHeight: CGFloat = 24.0
+        let btnHeight: CGFloat = 22.0
         let btnWidth: CGFloat = 24.0
         // Keep the arrow on the first visible line of a tall hunk instead of off-screen in its middle.
         let visibleTop: CGFloat = 0
@@ -336,7 +359,9 @@ public final class DiffEditorView: NSView {
             buttonY = min(max(buttonY, max(hunkTop, visibleTop)), min(hunkBottom, visibleBottom))
         }
 
-        let btnX: CGFloat = (side == .left) ? bounds.width - btnWidth - 4.0 : 4.0
+        // Centered in the seam margin, with equal air on both sides.
+        let inset = (DiffActionMarginView.width - btnWidth) / 2.0
+        let btnX: CGFloat = (side == .left) ? bounds.width - btnWidth - inset : inset
 
         hunkActionButton.frame = NSRect(x: btnX, y: buttonY, width: btnWidth, height: btnHeight)
         hunkActionButton.isHidden = false
@@ -434,9 +459,12 @@ public final class DiffEditorView: NSView {
 
     @objc private func textDidChangeNotification(_ notification: Notification) {
         placeholderLabel.isHidden = textStorage.length > 0
+        let lineCount = max(textView.string.components(separatedBy: "\n").count, 1)
+        gutterView.currentMaxLineNumber = lineCount
         gutterView.needsDisplay = true
         onTextChange?()
     }
+
 
     deinit {
         NotificationCenter.default.removeObserver(self)
@@ -512,38 +540,46 @@ public final class HunkActionButton: NSButton {
         addCursorRect(bounds, cursor: .arrow)
     }
 
-    public override func draw(_ dirtyRect: NSRect) {
-        // Just the arrow glyph with NO background or border, preserving the full clickable bounds
-        let arrow: NSString = (title.isEmpty ? "➔" : title) as NSString
-        let isDark = (effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+    private func symbolImage(pointSize: CGFloat) -> NSImage? {
+        let name = (title == "⬅") ? "arrow.left" : "arrow.right"
+        let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
+        return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+    }
 
-        let color: NSColor
-        let fontSize: CGFloat
-        var attrs: [NSAttributedString.Key: Any] = [:]
+    public override func draw(_ dirtyRect: NSRect) {
+        // A crisp SF Symbol arrow. On hover it sits on a soft accent disc — no border, ever.
+        let accent = DiffTheme.hoverArrowColor
+        let glyphColor: NSColor
 
         if isHovered {
-            color = isDark ? NSColor.white : NSColor(red: 3/255, green: 76/255, blue: 161/255, alpha: 1.0)
-            fontSize = 16.5
-            let shadow = NSShadow()
-            shadow.shadowColor = isDark
-                ? DiffTheme.hoverArrowColor.withAlphaComponent(0.95)
-                : NSColor(red: 9/255, green: 105/255, blue: 218/255, alpha: 0.65)
-            shadow.shadowBlurRadius = 5.0
-            shadow.shadowOffset = NSSize(width: 0, height: 0)
-            attrs[.shadow] = shadow
+            let diameter = min(bounds.width, bounds.height)
+            let disc = NSRect(
+                x: (bounds.width - diameter) / 2.0,
+                y: (bounds.height - diameter) / 2.0,
+                width: diameter,
+                height: diameter
+            )
+            accent.setFill()
+            NSBezierPath(ovalIn: disc).fill()
+            glyphColor = .white
         } else {
-            color = DiffTheme.hoverArrowColor
-            fontSize = 14.0
+            glyphColor = accent
         }
 
-        attrs[.font] = NSFont.systemFont(ofSize: fontSize, weight: .black)
-        attrs[.foregroundColor] = color
-
-        let size = arrow.size(withAttributes: attrs)
-        let point = NSPoint(
-            x: (bounds.width - size.width) / 2.0,
-            y: (bounds.height - size.height) / 2.0
+        guard let symbol = symbolImage(pointSize: 12.5) else { return }
+        let size = symbol.size
+        let rect = NSRect(
+            x: ((bounds.width - size.width) / 2.0).rounded(),
+            y: ((bounds.height - size.height) / 2.0).rounded(),
+            width: size.width,
+            height: size.height
         )
-        arrow.draw(at: point, withAttributes: attrs)
+        let tinted = NSImage(size: size, flipped: false) { r in
+            symbol.draw(in: r)
+            glyphColor.set()
+            r.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1.0, respectFlipped: true, hints: nil)
     }
 }

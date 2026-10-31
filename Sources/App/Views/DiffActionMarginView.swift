@@ -1,10 +1,16 @@
 import AppKit
 
-/// A dedicated, text-free margin view on the trailing seam edge of the Left DiffEditor.
-/// Ensures the action arrow (➔) resides in an isolated margin where text cannot flow,
-/// preventing text overlap and guaranteeing a standard arrow cursor.
+/// A dedicated, text-free margin on the seam edge of each DiffEditor: trailing on the left pane,
+/// leading (before the line numbers) on the right pane. The per-hunk action arrow lives here so it
+/// never overlaps text or line numbers and always gets a standard arrow cursor.
 public final class DiffActionMarginView: NSView {
     public override var isFlipped: Bool { return true }
+    public static let width: CGFloat = 32.0
+
+    /// Which pane this margin belongs to; decides which row kinds it tints.
+    public var side: EditorSide = .left {
+        didSet { needsDisplay = true }
+    }
 
     /// Distance from the top of the document to the top of this view (editor-local, find-bar aware).
     public var scrollOffset: CGFloat = 0.0 {
@@ -94,8 +100,9 @@ public final class DiffActionMarginView: NSView {
     public override func draw(_ dirtyRect: NSRect) {
         let lineHeight = DiffTheme.editorLineHeight
 
-        // Base background matches editor text area
-        NSColor.textBackgroundColor.setFill()
+        // Left margin continues the text area; right margin continues the line-number gutter.
+        let base = (side == .left) ? NSColor.textBackgroundColor : DiffTheme.gutterBackground
+        base.setFill()
         dirtyRect.fill()
 
         guard let rows = visibleRowRange(in: dirtyRect, scrollOffset: scrollOffset, rowCount: rowInfos.count) else { return }
@@ -107,8 +114,11 @@ public final class DiffActionMarginView: NSView {
 
             if info.kind == .spacer {
                 DiffTheme.drawSpacer(in: rowRect, dirtyRect: dirtyRect)
-            } else if info.kind == .deletion {
+            } else if info.kind == .deletion && side == .left {
                 DiffTheme.deletionBackground.setFill()
+                rowRect.intersection(dirtyRect).fill()
+            } else if info.kind == .addition && side == .right {
+                DiffTheme.additionGutterBackground.setFill()
                 rowRect.intersection(dirtyRect).fill()
             }
         }

@@ -58,6 +58,9 @@ Toggle **¶ Invisibles** (`⇧⌘I`) to reveal hidden characters in a dim, non-d
 ### Frictionless Global Operations & Complete Undo
 Need to accept all changes at once? Use **Copy All ➔** or **⬅ Copy All** from the frosted toolbar. Need to reset? Hit **Clear**. Every operation—single hunk merges, wholesale copies, and document clears—is grouped into clean, named undo actions (`⌘Z` / `⇧⌘Z`).
 
+### Safe Saving
+Save the focused pane back to its file with `⌘S` (`⇧⌘S` to Save As, `⌥⌘S` for both panes). Saves keep the file's original encoding, BOM and line endings, write through symlinks, preserve permissions, and never leave a half-written file. If another app changed the file since you opened it, Diffr asks before overwriting. Closing, quitting, clearing, or opening a new file over a pane with unsaved edits prompts **Save / Don't Save / Cancel**. Pasted scratch text that was never saved does not trigger the prompt.
+
 ---
 
 ## How It Works
@@ -101,6 +104,9 @@ Need to accept all changes at once? Use **Copy All ➔** or **⬅ Copy All** fro
 | :--- | :--- | :--- |
 | `⌘O` | **Open Left Pane…** | Choose file for the original pane |
 | `⌥⌘O` | **Open Right Pane…** | Choose file for the modified pane |
+| `⌘S` | **Save Pane** | Save the focused pane to its file |
+| `⇧⌘S` | **Save Pane As…** | Save the focused pane to a new file |
+| `⌥⌘S` | **Save Both Panes** | Save left, then right |
 | `⌘]` | **Next Change** | Jump to the next hunk and position cursors |
 | `⌘[` | **Previous Change** | Jump to the previous hunk and position cursors |
 | `⌥⌘→` | **Copy Change to Right** | Merge active hunk from Left to Right |

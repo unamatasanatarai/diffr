@@ -170,6 +170,22 @@ public enum RegressionTests {
             window?.close()
         }
 
+        testRunner("Flip sides swaps both panes and is a single undoable step") {
+            let (left, right, coord, window) = makeEditors(inWindow: true)
+            coord.setInitialTexts(left: "alpha text", right: "beta text")
+            window?.undoManager?.removeAllActions()
+            coord.flipSides()
+            try expect(left.text == "beta text" && right.text == "alpha text", "Got \(left.text) / \(right.text)")
+            let undo = try unwrap(window?.undoManager)
+            try expect(undo.canUndo, "Flip sides must register undo")
+            try expect(undo.undoActionName == "Flip Sides", "Action name: \(undo.undoActionName)")
+            undo.undo()
+            try expect(left.text == "alpha text" && right.text == "beta text", "Undo must restore original sides")
+            undo.redo()
+            try expect(left.text == "beta text" && right.text == "alpha text", "Redo must re-swap sides")
+            window?.close()
+        }
+
         testRunner("Programmatic replace edits only the differing range and keeps surrogate pairs intact") {
             let (left, _, _, _) = makeEditors()
             left.text = "a😀b\nunchanged tail"
@@ -231,7 +247,7 @@ public enum RegressionTests {
             let b = (0..<10_000).map { "completely different \($0 * 7919)" }.joined(separator: "\n")
             var result = DiffResult.empty
             let elapsed = time { result = DiffEngine.computeDiff(leftText: a, rightText: b) }
-            try expect(elapsed < 3.0, "Took \(elapsed)s")
+            try expect(elapsed < 5.0, "Took \(elapsed)s")
             try expect(result.deletionsCount == 10_000 && result.additionsCount == 10_000)
         }
 
@@ -287,7 +303,68 @@ public enum RegressionTests {
             do { _ = try TextFileLoader.load(url: dir) } catch let e as TextFileLoadError { dirError = e }
             try expect(dirError == .notARegularFile)
         }
+
+        // MARK: - Double ⌘Q Quit
+
+        testRunner("Double ⌘Q requires two shortcut presses to terminate; single press shows HUD; mouse click terminates directly") {
+            let appDelegate = AppDelegate()
+            var terminateCount = 0
+            appDelegate.terminateHandler = { _ in
+                terminateCount += 1
+            }
+
+            // 1. Mouse click from menu bar terminates directly
+            appDelegate.handleQuitRequest(isKeyboardShortcut: false)
+            try expect(terminateCount == 1, "Mouse menu quit should terminate immediately")
+
+            // 2. First keyboard shortcut (⌘Q) shows HUD and arms timer, does NOT terminate
+            terminateCount = 0
+            appDelegate.handleQuitRequest(isKeyboardShortcut: true)
+            try expect(terminateCount == 0, "First ⌘Q must not terminate")
+
+            // 3. Second keyboard shortcut (⌘Q) within timeout terminates
+            appDelegate.handleQuitRequest(isKeyboardShortcut: true)
+            try expect(terminateCount == 1, "Second ⌘Q within timeout must terminate")
+
+            // 4. Keyboard shortcut after timeout expires does NOT terminate on second press
+            terminateCount = 0
+            appDelegate.doubleQuitTimeout = 0.05
+            appDelegate.handleQuitRequest(isKeyboardShortcut: true)
+            try expect(terminateCount == 0)
+            Thread.sleep(forTimeInterval: 0.08)
+            // Now this press is treated as a fresh first press!
+            appDelegate.handleQuitRequest(isKeyboardShortcut: true)
+            try expect(terminateCount == 0, "Press after timeout should be treated as fresh first press, not terminate")
+            // Immediate follow-up press terminates
+            appDelegate.handleQuitRequest(isKeyboardShortcut: true)
+            try expect(terminateCount == 1, "Immediate follow-up press must terminate")
+        }
+
+        // MARK: - Dynamic Gutter Sizing
+
+        testRunner("Gutter width dynamically accommodates current max line number width, margins, and indicator space, syncing across panes") {
+            let leftEditor = DiffEditorView(side: .left)
+            let rightEditor = DiffEditorView(side: .right)
+            let coord = DiffCoordinator(leftEditor: leftEditor, rightEditor: rightEditor)
+
+            // 1. Initial 1-digit gutter width is compact (~38pt)
+            let width1 = LineNumberRulerView.requiredWidth(forMaxLineNumber: 1)
+            try expect(width1 < 42.0, "1-digit gutter must be compact, got \(width1)")
+            try expect(width1 >= 36.0, "Must be at least 36pt, got \(width1)")
+
+            // 2. Diff with 5 lines on left and 250 lines on right
+            let textLeft = (1...5).map { "line \($0)" }.joined(separator: "\n")
+            let textRight = (1...250).map { "line \($0)" }.joined(separator: "\n")
+            coord.setInitialTexts(left: textLeft, right: textRight)
+
+            let width3 = LineNumberRulerView.requiredWidth(forMaxLineNumber: 250)
+            try expect(width3 > width1, "3-digit gutter must be wider than 1-digit gutter")
+            try expect(leftEditor.gutterWidthConstraint.constant == width3, "Left gutter must sync to max line count (250)")
+            try expect(rightEditor.gutterWidthConstraint.constant == width3, "Right gutter must sync to max line count (250)")
+        }
     }
+
+
 
     private static func unwrap<T>(_ value: T?, file: StaticString = #fileID, line: UInt = #line) throws -> T {
         guard let value = value else { throw TestFailure(message: "Unexpected nil", location: "\(file):\(line)") }

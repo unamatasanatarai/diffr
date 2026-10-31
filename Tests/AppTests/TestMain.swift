@@ -56,6 +56,9 @@ struct TestMain {
         print("\n--- Adversarial Regression Suite ---")
         RegressionTests.run(testRunner: runTest)
 
+        print("\n--- File Save & Unsaved Changes Suite ---")
+        SaveTests.run(testRunner: runTest)
+
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
 
         print("\n--------------------------------------------------")

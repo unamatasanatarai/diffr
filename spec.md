@@ -28,8 +28,8 @@
 │                        MainWindowController                            │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
 │  │       Frosted Vibrancy Header Bar (NSVisualEffectView, 48pt)     │  │
-│  │ [Traffic Lights] [ORIGINAL] [Copy All ➔]  [Status Capsule]       │  │
-│  │ [‹ Prev] [Next ›] [¶ Invisibles]  [⬅ Copy All] [MODIFIED] [Clear] │  │
+│  │ [Traffic Lights] [-N] [➔]                  [↑] [↓] [⇄] [¶]       │  │
+│  │                                     [⬅] [+N]                     │  │
 │  │ 1px Hairline Bottom Border (SeparatorLineView)                   │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
@@ -509,6 +509,7 @@ Before applying any hunk copy, `DiffEngine.applyHunk` validates that the target 
 
 | Menu Category | Action Item | Shortcut | Selector |
 | :--- | :--- | :--- | :--- |
+| **Diffr** | Quit Diffr | `Double ⌘Q` | `quitRequested(_:)` (Double-press within 1.75s to quit; single press shows floating HUD) |
 | **File** | Open in Left Pane… | `⌘O` | `openInLeftPane(_:)` |
 | **File** | Open in Right Pane… | `⌥⌘O` | `openInRightPane(_:)` |
 | **File** | Clear Both Panes | — | `clearAllClicked` |
@@ -525,6 +526,7 @@ Before applying any hunk copy, `DiffEngine.applyHunk` validates that the target 
 | **Changes** | Copy Change to Left | `⌥⌘←` | `copyChangeToLeft(_:)` |
 | **Changes** | Copy All to Right | — | `copyAllRightClicked` |
 | **Changes** | Copy All to Left | — | `copyAllLeftClicked` |
+
 
 ---
 

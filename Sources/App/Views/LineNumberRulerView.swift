@@ -32,10 +32,35 @@ func rowIndex(atY y: CGFloat, scrollOffset: CGFloat) -> Int? {
 public final class LineNumberRulerView: NSView {
     public override var isFlipped: Bool { return true }
 
+    public static let leftMargin: CGFloat = 8.0
+    public static let gap: CGFloat = 6.0
+    public static let indicatorWidth: CGFloat = 10.0
+    public static let rightMargin: CGFloat = 8.0
+    public static let minGutterWidth: CGFloat = 36.0
+
+    public static func requiredWidth(forMaxLineNumber maxLine: Int) -> CGFloat {
+        let maxStr = "\(max(maxLine, 1))" as NSString
+        let numWidth = ceil(maxStr.size(withAttributes: lineNumberAttrs).width)
+        let total = leftMargin + numWidth + gap + indicatorWidth + rightMargin
+        return max(minGutterWidth, ceil(total))
+    }
+
     public let side: EditorSide
     public var rowInfos: [RulerRowInfo] = [] {
-        didSet { needsDisplay = true }
+        didSet {
+            updateRequiredGutterWidth()
+            needsDisplay = true
+        }
     }
+    public var currentMaxLineNumber: Int = 1 {
+        didSet {
+            if currentMaxLineNumber != oldValue {
+                updateRequiredGutterWidth()
+            }
+        }
+    }
+    public var onGutterWidthNeeded: ((CGFloat) -> Void)?
+
     /// Distance from the top of the document to the top of this view (editor-local, find-bar aware).
     public var scrollOffset: CGFloat = 0.0 {
         didSet {
@@ -64,13 +89,21 @@ public final class LineNumberRulerView: NSView {
 
     public init(side: EditorSide) {
         self.side = side
-        super.init(frame: NSRect(x: 0, y: 0, width: 60, height: 100))
+        let initialWidth = Self.requiredWidth(forMaxLineNumber: 1)
+        super.init(frame: NSRect(x: 0, y: 0, width: initialWidth, height: 100))
         wantsLayer = true
         setAccessibilityElement(false)
     }
 
     public required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    public func updateRequiredGutterWidth() {
+        let maxInRows = rowInfos.compactMap { $0.lineNumber }.max() ?? 1
+        let maxLine = max(maxInRows, currentMaxLineNumber, 1)
+        let needed = Self.requiredWidth(forMaxLineNumber: maxLine)
+        onGutterWidthNeeded?(needed)
     }
 
     public override func scrollWheel(with event: NSEvent) {
@@ -130,6 +163,11 @@ public final class LineNumberRulerView: NSView {
         let displayInfos = rowInfos.isEmpty ? [RulerRowInfo(lineNumber: 1, kind: .unchanged, hunkIndex: nil)] : rowInfos
         guard let rows = visibleRowRange(in: dirtyRect, scrollOffset: scrollOffset, rowCount: displayInfos.count) else { return }
 
+        // Layout within bounds.width:
+        // [leftMargin] [num right-aligned to numRightX] [gap] [indicator at indicatorX] [rightMargin] [1px border]
+        let numRightX = bounds.width - Self.rightMargin - Self.indicatorWidth - Self.gap
+        let indicatorX = numRightX + Self.gap
+
         for rowIdx in rows {
             let info = displayInfos[rowIdx]
             let rowY = DiffTheme.editorTextInsetY + CGFloat(rowIdx) * lineHeight - scrollOffset
@@ -149,13 +187,11 @@ public final class LineNumberRulerView: NSView {
             if let num = info.lineNumber {
                 let numStr = "\(num)" as NSString
                 let numSize = numStr.size(withAttributes: Self.lineNumberAttrs)
-                let numAlignX: CGFloat = (side == .right) ? 58.0 : 40.0
-                let minX: CGFloat = (side == .right) ? 28.0 : 4.0
                 let numY = rowRect.origin.y + (rowRect.height - numSize.height) / 2
-                numStr.draw(at: NSPoint(x: max(minX, numAlignX - numSize.width), y: numY), withAttributes: Self.lineNumberAttrs)
+                let numX = max(Self.leftMargin, numRightX - numSize.width)
+                numStr.draw(at: NSPoint(x: numX, y: numY), withAttributes: Self.lineNumberAttrs)
             }
 
-            let indicatorX: CGFloat = (side == .right) ? 64.0 : 46.0
             let indicator: (NSString, NSColor)?
             if info.kind == .deletion && side == .left {
                 indicator = ("-", DiffTheme.deletionIndicatorColor)
@@ -167,7 +203,8 @@ public final class LineNumberRulerView: NSView {
             if let (glyph, color) = indicator {
                 let attrs: [NSAttributedString.Key: Any] = [.font: Self.indicatorFont, .foregroundColor: color]
                 let size = glyph.size(withAttributes: attrs)
-                glyph.draw(at: NSPoint(x: indicatorX, y: rowRect.origin.y + (rowRect.height - size.height) / 2), withAttributes: attrs)
+                let glyphX = indicatorX + (Self.indicatorWidth - size.width) / 2
+                glyph.draw(at: NSPoint(x: glyphX, y: rowRect.origin.y + (rowRect.height - size.height) / 2), withAttributes: attrs)
             }
         }
     }
